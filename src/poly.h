@@ -117,6 +117,8 @@ uint8_t ntru_mult_tern_64(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint1
  * @return 0 if the number of coefficients differ, 1 otherwise
  */
 uint8_t ntru_mult_tern_sse(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask);
+uint8_t ntru_mult_tern_avx2(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask);
+uint8_t ntru_mult_tern_avx512(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask);
 
 #ifndef NTRU_AVOID_HAMMING_WT_PATENT
 /**
@@ -283,6 +285,8 @@ uint8_t ntru_mult_int_64(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_
  * @return 0 if the number of coefficients differ, 1 otherwise
  */
 uint8_t ntru_mult_int_sse(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_t mod_mask);
+uint8_t ntru_mult_int_avx2(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_t mod_mask);
+uint8_t ntru_mult_int_avx512(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_t mod_mask);
 
 /**
  * @brief Reduction modulo a power of two
