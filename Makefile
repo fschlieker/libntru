@@ -1,30 +1,44 @@
-CC?=gcc
+CC=gcc5
 AS=$(CC) -c
 AR?=ar
 
 CFLAGS?=-g
 CFLAGS+=-Wall -Wextra -Wno-unused-parameter
-SSSE3_FLAG = $(shell /bin/grep -m 1 -o ssse3 /proc/cpuinfo)
-ifneq ($(SSE), no)
-    ifeq ($(SSSE3_FLAG), ssse3)
-        SSE=yes
-    endif
-endif
-ifeq ($(SSE), yes)
-    CFLAGS+=-mssse3
+ifeq ($(VEC), avx512)
+	SSE=no
+	AVX2=no
+	AVX512=yes
+	CFLAGS+=-mavx512bw -mavx512f -mavx512vl
+else ifeq ($(VEC), avx2)
+	SSE=no
+	AVX2=yes
+	AVX512=no
+	CFLAGS+=-mavx2
+else ifeq ($(VEC), sse)
+	SSE=yes
+	AVX2=no
+	AVX512=no
+	CFLAGS+=-mssse3
+else ifeq ($(VEC), none)
+	SSE=no
+	AVX2=no
+	AVX512=no
+else
+	$(error Set environment variable VEC to one of {none,sse,avx2,avx512})=
 endif
 
 # use -march=native if we're compiling for x86
 BENCH_ARCH_OPTION=
 MACHINE=$(shell uname -m | sed 's/i.86/i386/g')
-ifeq ($(SSE), yes)
-    ifeq ($(MACHINE), i386)
-        BENCH_ARCH_OPTION=-march=native
-    endif
-    ifeq ($(MACHINE), x86_64)
-        BENCH_ARCH_OPTION=-march=native
-    endif
-endif
+# ifneq ($(VEC), none)
+#     ifeq ($(MACHINE), i386)
+#         BENCH_ARCH_OPTION=-march=native
+#     endif
+#     ifeq ($(MACHINE), x86_64)
+#         BENCH_ARCH_OPTION=-march=native
+#     endif
+# endif
+
 OPTFLAGS=-O2
 bench: OPTFLAGS=-O3 $(BENCH_ARCH_OPTION)
 CFLAGS+=$(OPTFLAGS)
@@ -33,7 +47,7 @@ LIBS+=-lrt
 SRCDIR=src
 TESTDIR=tests
 LIB_OBJS=bitstring.o encparams.o hash.o idxgen.o key.o mgf.o ntru.o poly.o rand.o arith.o sha1.o sha2.o nist_ctr_drbg.o rijndael.o rijndael-alg-fst.o
-ifeq ($(SSE), yes)
+ifneq ($(VEC), none)
     ifeq ($(MACHINE), x86_64)
         LIB_OBJS+=sha1-mb-x86_64.o sha256-mb-x86_64.o
     endif

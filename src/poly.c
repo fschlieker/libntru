@@ -3,6 +3,9 @@
 #ifdef __SSSE3__
 #include <tmmintrin.h>
 #endif
+#if (defined(__AVX2__) || defined(__AVX512F__))
+#include <immintrin.h>
+#endif
 #include "poly.h"
 #include "rand.h"
 #include "err.h"
@@ -111,16 +114,6 @@ void ntru_neg_mod(NtruIntPoly *a, uint16_t modulus) {
     uint16_t i;
     for (i=0; i<a->N; i++)
         a->coeffs[i] = modulus - a->coeffs[i];
-}
-
-uint8_t ntru_mult_int(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
-#ifdef __SSSE3__
-    return ntru_mult_int_sse(a, b, c, mod_mask);
-#elif _LP64
-    return ntru_mult_int_64(a, b, c, mod_mask);
-#else
-    return ntru_mult_int_16(a, b, c, mod_mask);
-#endif
 }
 
 void ntru_mult_int_16_base(int16_t *a, int16_t *b, int16_t *c, uint16_t len, uint16_t N, uint16_t mod_mask) {
@@ -391,13 +384,161 @@ uint8_t ntru_mult_int_sse(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16
 }
 #endif   /* __SSSE3__ */
 
-uint8_t ntru_mult_tern(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
-#ifdef __SSSE3__
-    return ntru_mult_tern_sse(a, b, c, mod_mask);
+#ifdef __AVX2__
+uint8_t ntru_mult_int_avx2(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    uint16_t N = a->N;
+    if (N != b->N)
+        return 0;
+    c->N = N;
+    int16_t c_coeffs[2*NTRU_INT_POLY_SIZE];   /* double capacity for intermediate result */
+    memset(&c_coeffs, 0, sizeof(c_coeffs));
+
+    uint16_t k;
+    for (k=N; k<NTRU_INT_POLY_SIZE; k++) {
+        a->coeffs[k] = 0;
+        b->coeffs[k] = 0;
+    }
+    for (k=0; k<N; k+=16) {
+        uint8_t j;
+
+        __m256i b256[8];
+        for (j=0; j<8; j++) {
+
+            b256[j] = _mm256_inserti128_si256(_mm256_castsi128_si256(
+                    _mm_set1_epi16(b->coeffs[k+j])),
+                    _mm_set1_epi16(b->coeffs[k+8+j]),1);
+        }
+
+        /* indices 0..7 */
+        __m128i tmp_a = _mm_lddqu_si128((__m128i*)&a->coeffs[0]);
+        __m256i a256 = _mm256_broadcastsi128_si256(tmp_a);
+
+        __m256i c256 = _mm256_lddqu_si256((__m256i*)&c_coeffs[k]);
+        for (j=0; j<8; j++) {
+            __m256i product = _mm256_mullo_epi16(a256, b256[j]);
+            c256 = _mm256_add_epi16(c256, product);
+            a256 = _mm256_bslli_epi128(a256, 2);
+        }
+        _mm256_storeu_si256((__m256i*)&c_coeffs[k], c256);
+
+        /* indices 8... */
+        uint16_t i;
+        for (i=8; i<N+8; i+=8) {
+            __m256i c256 = _mm256_lddqu_si256((__m256i*)&c_coeffs[k+i]);
+            
+            __m128i tmp_0 = _mm_lddqu_si128((__m128i*)&a->coeffs[i-7]);
+            __m256i a256_0 = _mm256_broadcastsi128_si256(tmp_0);
+            
+            __m128i tmp_1 = _mm_lddqu_si128((__m128i*)&a->coeffs[i]);
+            __m256i a256_1 = _mm256_broadcastsi128_si256(tmp_1);
+
+
+            for (j=0; j<8; j++) {
+                __m256i product = _mm256_mullo_epi16(a256_1, b256[j]);
+                c256 = _mm256_add_epi16(c256, product);
+
+                a256_0 = _mm256_bslli_epi128(a256_0, 2);
+                a256_1 = _mm256_alignr_epi8(a256_1, a256_0, 14);
+            }
+            _mm256_storeu_si256((__m256i*)&c_coeffs[k+i], c256);
+        }
+    }
+
+    /* no need to SSE-ify the following loop b/c the compiler auto-vectorizes it */
+    for (k=0; k<N; k++)
+        c->coeffs[k] = c_coeffs[k] + c_coeffs[N+k];
+
+    ntru_mod_mask(c, mod_mask);
+    return 1;
+}
+#endif   /* __AVX2__ */
+
+#ifdef __AVX512F__
+uint8_t ntru_mult_int_avx512(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    uint16_t N = a->N;
+    if (N != b->N)
+        return 0;
+    c->N = N;
+    int16_t c_coeffs[2*NTRU_INT_POLY_SIZE];   /* double capacity for intermediate result */
+    memset(&c_coeffs, 0, sizeof(c_coeffs));
+
+    uint16_t k;
+    for (k=N; k<NTRU_INT_POLY_SIZE; k++) {
+        a->coeffs[k] = 0;
+        b->coeffs[k] = 0;
+    }
+    for (k=0; k<N; k+=32) {
+        uint8_t j;
+
+        __m512i b512[8];
+        for (j=0; j<8; j++) {
+            __m256i tmp0 = _mm256_set1_epi16(b->coeffs[k+j]);
+            __m256i tmp1 = _mm256_set1_epi16(b->coeffs[k+j+8]);
+            __m256i tmp2 = _mm256_set1_epi16(b->coeffs[k+j+16]);
+            __m256i tmp3 = _mm256_set1_epi16(b->coeffs[k+j+24]);
+
+            __m256i tmp4 = _mm256_permute2x128_si256(tmp0, tmp1, _MM_SHUFFLE(0,2,0,0));
+            __m256i tmp5 = _mm256_permute2x128_si256(tmp2, tmp3, _MM_SHUFFLE(0,2,0,0));
+
+            b512[j] = _mm512_inserti64x4(_mm512_castsi256_si512(tmp4), tmp5, 1);
+        }
+
+        /* indices 0..7 */
+        __m128i tmp_a = _mm_lddqu_si128((__m128i*)&a->coeffs[0]);
+        __m512i a512 = _mm512_broadcast_i32x4(tmp_a);
+
+        __m512i c512 = _mm512_loadu_si512((__m512i*)&c_coeffs[k]);
+        for (j=0; j<8; j++) {
+            __m512i product = _mm512_mullo_epi16(a512, b512[j]);
+            c512 = _mm512_add_epi16(c512, product);
+            a512 = _mm512_bslli_epi128(a512, 2);
+
+        }
+        _mm512_storeu_si512((__m512i*)&c_coeffs[k], c512);
+
+        /* indices 8... */
+        uint16_t i;
+        for (i=8; i<N+8; i+=8) {
+            __m512i c512 = _mm512_loadu_si512((__m512i*)&c_coeffs[k+i]);
+            
+            __m128i tmp_0 = _mm_lddqu_si128((__m128i*)&a->coeffs[i-7]);
+            __m512i a512_0 = _mm512_broadcast_i32x4(tmp_0);
+            
+            __m128i tmp_1 = _mm_lddqu_si128((__m128i*)&a->coeffs[i]);
+            __m512i a512_1 = _mm512_broadcast_i32x4(tmp_1);
+
+
+            for (j=0; j<8; j++) {
+                __m512i product = _mm512_mullo_epi16(a512_1, b512[j]);
+                c512 = _mm512_add_epi16(c512, product);
+
+                a512_0 = _mm512_bslli_epi128(a512_0, 2);
+                a512_1 = _mm512_alignr_epi8(a512_1, a512_0, 14);
+            }
+            _mm512_storeu_si512((__m512i*)&c_coeffs[k+i], c512);
+        }
+    }
+
+    /* no need to SSE-ify the following loop b/c the compiler auto-vectorizes it */
+    for (k=0; k<N; k++)
+        c->coeffs[k] = c_coeffs[k] + c_coeffs[N+k];
+
+    ntru_mod_mask(c, mod_mask);
+    return 1;
+}
+#endif   /* __AVX512F__ */
+
+uint8_t ntru_mult_int(NtruIntPoly *a, NtruIntPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+#ifdef __AVX512F__
+    return ntru_mult_int_avx512(a, b, c, mod_mask);
+#elif __AVX2__
+    return ntru_mult_int_avx2(a, b, c, mod_mask);
+#elif __SSSE3__
+    return ntru_mult_int_sse(a, b, c, mod_mask);
 #elif _LP64
-    return ntru_mult_tern_64(a, b, c, mod_mask);
+    return ntru_mult_int_64(a, b, c, mod_mask);
 #else
-    return ntru_mult_tern_32(a, b, c, mod_mask);
+    return ntru_mult_int_16(a, b, c, mod_mask);
 #endif
 }
 
@@ -708,6 +849,356 @@ uint8_t ntru_mult_tern_sse(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint
         return ntru_mult_tern_sse_dense(a, b, c, mod_mask);
 }
 #endif   /* __SSSE3__ */
+
+
+#ifdef __AVX2__
+uint8_t ntru_mult_tern_avx2_sparse(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    uint16_t N = a->N;
+    if (N != b->N)
+        return 0;
+    memset(&c->coeffs, 0, N * sizeof c->coeffs[0]);
+    c->N = N;
+
+    /* add coefficients that are multiplied by 1 */
+    uint16_t i;
+    for (i=0; i<b->num_ones; i++) {
+        int16_t j;
+        int16_t k = b->ones[i];
+        uint16_t j_end = N<b->ones[i] ? 0 : N-b->ones[i];
+        /* it is safe not to truncate the last block of 8 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        for (j=0; j<j_end; j+=16,k+=16) {
+            __m256i ck = _mm256_lddqu_si256((__m256i*)&c->coeffs[k]);
+            __m256i aj = _mm256_lddqu_si256((__m256i*)&a->coeffs[j]);
+            __m256i ca = _mm256_add_epi16(ck, aj);
+            _mm256_storeu_si256((__m256i*)&c->coeffs[k], ca);
+        }
+        j = j_end;
+        for (k=0; j<N-15; j+=16,k+=16) {
+            __m256i ck = _mm256_lddqu_si256((__m256i*)&c->coeffs[k]);
+            __m256i aj = _mm256_lddqu_si256((__m256i*)&a->coeffs[j]);
+            __m256i ca = _mm256_add_epi16(ck, aj);
+            _mm256_storeu_si256((__m256i*)&c->coeffs[k], ca);
+        }
+        for (; j<N; j++,k++)
+            c->coeffs[k] += a->coeffs[j];
+    }
+
+    /* subtract coefficients that are multiplied by -1 */
+    for (i=0; i<b->num_neg_ones; i++) {
+        int16_t j;
+        int16_t k = b->neg_ones[i];
+        uint16_t j_end = N<b->neg_ones[i] ? 0 : N-b->neg_ones[i];
+        /* it is safe not to truncate the last block of 8 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        for (j=0; j<j_end; j+=16,k+=16) {
+            __m256i ck = _mm256_lddqu_si256((__m256i*)&c->coeffs[k]);
+            __m256i aj = _mm256_lddqu_si256((__m256i*)&a->coeffs[j]);
+            __m256i ca = _mm256_sub_epi16(ck, aj);
+            _mm256_storeu_si256((__m256i*)&c->coeffs[k], ca);
+        }
+        j = j_end;
+        for (k=0; j<N-15; j+=16,k+=16) {
+            __m256i ck = _mm256_lddqu_si256((__m256i*)&c->coeffs[k]);
+            __m256i aj = _mm256_lddqu_si256((__m256i*)&a->coeffs[j]);
+            __m256i ca = _mm256_sub_epi16(ck, aj);
+            _mm256_storeu_si256((__m256i*)&c->coeffs[k], ca);
+        }
+        for (; j<N; j++,k++)
+            c->coeffs[k] -= a->coeffs[j];
+    }
+
+    ntru_mod_mask(c, mod_mask);
+    return 1;
+}
+
+/* Optimized for large df */
+// __m256i SHIFT_MASK = {0xFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFF,0xFFFFFFFFFFFFFFFF};
+
+uint8_t ntru_mult_tern_avx2_dense(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    uint16_t N = a->N;
+    if (N != b->N)
+        return 0;
+    c->N = N;
+
+    uint16_t i;
+    for (i=N; i<NTRU_INT_POLY_SIZE; i++)
+        a->coeffs[i] = 0;
+    int16_t c_coeffs_arr[16+2*NTRU_INT_POLY_SIZE];   /* double capacity for intermediate result + another 8 */
+    int16_t *c_coeffs = c_coeffs_arr + 16;
+    memset(&c_coeffs_arr, 0, sizeof(c_coeffs_arr));
+
+    __m256i a_coeffs0[16];
+    a_coeffs0[0] = _mm256_lddqu_si256((__m256i*)&a->coeffs[0]);
+
+    for (i=1; i<16; i++) {
+        /* Emulate the SSE full-register shifting behaviour in AVX2 (the  */
+        /* corresponding _mm256_slli_si256 instruction shifts the two */
+        /* 128-bit lanes independently instead of the whole register). */
+        /* Two AVX2 instructions are needed for this. */
+        __m256i mask = _mm256_permute2x128_si256(a_coeffs0[i-1], a_coeffs0[i-1], _MM_SHUFFLE(0,0,2,0) );
+        a_coeffs0[i] = _mm256_alignr_epi8(a_coeffs0[i-1],mask,14);
+    }
+
+    /* add coefficients that are multiplied by 1 */
+    for (i=0; i<b->num_ones; i++) {
+        int16_t k = b->ones[i];
+        /* process the first num_coeffs0 coefficients, 1<=num_coeffs0<=8 */
+        uint8_t num_bytes0 = 32 - (((size_t)&c_coeffs[k])%32);
+        uint8_t num_coeffs0 = num_bytes0 / 2;   /* c_coeffs[k+num_coeffs0] is 32-byte aligned */
+        k -= 16 - num_coeffs0;
+        __m256i *ck = (__m256i*)&c_coeffs[k];
+        __m256i aj = a_coeffs0[16-num_coeffs0];
+        __m256i ca = _mm256_add_epi16(*ck, aj);
+        _mm256_store_si256(ck, ca);
+        k += 16;
+        /* process the remaining coefficients in blocks of 16. */
+        /* it is safe not to truncate the last block of 16 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        ck = (__m256i*)&c_coeffs[k];
+        int16_t j;
+        for (j=num_coeffs0; j<N; j+=16,k+=16) {
+            __m256i aj = _mm256_lddqu_si256((__m256i*)&a->coeffs[j]);
+            __m256i ca = _mm256_add_epi16(*ck, aj);
+            _mm256_store_si256(ck, ca);
+            ck++;
+        }
+    }
+
+    /* subtract coefficients that are multiplied by -1 */
+    for (i=0; i<b->num_neg_ones; i++) {
+        int16_t k = b->neg_ones[i];
+        /* process the first num_coeffs0 coefficients, 1<=num_coeffs0<=8 */
+        uint8_t num_bytes0 = 32 - (((size_t)&c_coeffs[k])%32);
+        uint8_t num_coeffs0 = num_bytes0 / 2;   /* c_coeffs[k+num_coeffs0] is 32-byte aligned */
+        k -= 16 - num_coeffs0;
+        __m256i *ck = (__m256i*)&c_coeffs[k];
+        __m256i aj = a_coeffs0[16-num_coeffs0];
+        __m256i ca = _mm256_sub_epi16(*ck, aj);
+        _mm256_store_si256(ck, ca);
+        k += 16;
+        /* process the remaining coefficients in blocks of 16. */
+        /* it is safe not to truncate the last block of 16 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        ck = (__m256i*)&c_coeffs[k];
+        int16_t j;
+        for (j=num_coeffs0; j<N; j+=16,k+=16) {
+            __m256i aj = _mm256_lddqu_si256((__m256i*)&a->coeffs[j]);
+            __m256i ca = _mm256_sub_epi16(*ck, aj);
+            _mm256_store_si256(ck, ca);
+            ck++;
+        }
+    }
+
+    /* reduce c_coeffs[0..2N-1] to [0..N-1] and apply mod_mask to reduce values mod q */
+    /* handle the first coefficients individually if c_coeffs is not 16-byte aligned */
+    for (i=0; ((size_t)&c_coeffs[i])%32; i++)
+        c->coeffs[i] = (c_coeffs[i] + c_coeffs[N+i]) & mod_mask;
+    /* handle the remaining ones in blocks of 16 */
+    __m256i mod_mask_256 = _mm256_set1_epi16(mod_mask);
+    __m256i *ci = (__m256i*)(&c_coeffs[i]);
+    for (; i<N; i+=16) {
+        __m256i c256_1 = _mm256_lddqu_si256((__m256i*)&c_coeffs[i+N]);
+        __m256i c256_0 = _mm256_add_epi16(*ci, c256_1);
+        c256_0 = _mm256_and_si256(c256_0, mod_mask_256);
+        _mm256_storeu_si256((__m256i*)&c->coeffs[i], c256_0);
+        ci++;
+    }
+
+    return 1;
+}
+
+uint8_t ntru_mult_tern_avx2(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    if (b->num_ones<NTRU_SPARSE_THRESH && b->num_neg_ones<NTRU_SPARSE_THRESH)
+        return ntru_mult_tern_avx2_sparse(a, b, c, mod_mask);
+    else
+        return ntru_mult_tern_avx2_dense(a, b, c, mod_mask);
+}
+#endif   /* __AVX2__ */
+
+
+#ifdef __AVX512F__
+uint8_t ntru_mult_tern_avx512_sparse(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    uint16_t N = a->N;
+    if (N != b->N)
+        return 0;
+    memset(&c->coeffs, 0, N * sizeof c->coeffs[0]);
+    c->N = N;
+
+    /* add coefficients that are multiplied by 1 */
+    uint16_t i;
+    for (i=0; i<b->num_ones; i++) {
+        int16_t j;
+        int16_t k = b->ones[i];
+        uint16_t j_end = N<b->ones[i] ? 0 : N-b->ones[i];
+        /* it is safe not to truncate the last block of 8 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        for (j=0; j<j_end; j+=32,k+=32) {
+            __m512i ck = _mm512_loadu_si512((__m512i*)&c->coeffs[k]);
+            __m512i aj = _mm512_loadu_si512((__m512i*)&a->coeffs[j]);
+            __m512i ca = _mm512_add_epi16(ck, aj);
+            _mm512_storeu_si512((__m512i*)&c->coeffs[k], ca);
+        }
+        j = j_end;
+        for (k=0; j<N-15; j+=32,k+=32) {
+            __m512i ck = _mm512_loadu_si512((__m512i*)&c->coeffs[k]);
+            __m512i aj = _mm512_loadu_si512((__m512i*)&a->coeffs[j]);
+            __m512i ca = _mm512_add_epi16(ck, aj);
+            _mm512_storeu_si512((__m512i*)&c->coeffs[k], ca);
+        }
+        for (; j<N; j++,k++)
+            c->coeffs[k] += a->coeffs[j];
+    }
+
+    /* subtract coefficients that are multiplied by -1 */
+    for (i=0; i<b->num_neg_ones; i++) {
+        int16_t j;
+        int16_t k = b->neg_ones[i];
+        uint16_t j_end = N<b->neg_ones[i] ? 0 : N-b->neg_ones[i];
+        /* it is safe not to truncate the last block of 8 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        for (j=0; j<j_end; j+=32,k+=32) {
+            __m512i ck = _mm512_loadu_si512((__m512i*)&c->coeffs[k]);
+            __m512i aj = _mm512_loadu_si512((__m512i*)&a->coeffs[j]);
+            __m512i ca = _mm512_sub_epi16(ck, aj);
+            _mm512_storeu_si512((__m512i*)&c->coeffs[k], ca);
+        }
+        j = j_end;
+        for (k=0; j<N-15; j+=32,k+=32) {
+            __m512i ck = _mm512_loadu_si512((__m512i*)&c->coeffs[k]);
+            __m512i aj = _mm512_loadu_si512((__m512i*)&a->coeffs[j]);
+            __m512i ca = _mm512_sub_epi16(ck, aj);
+            _mm512_storeu_si512((__m512i*)&c->coeffs[k], ca);
+        }
+        for (; j<N; j++,k++)
+            c->coeffs[k] -= a->coeffs[j];
+    }
+
+    ntru_mod_mask(c, mod_mask);
+    return 1;
+}
+
+/* Optimized for large df */
+
+uint8_t ntru_mult_tern_avx512_dense(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    uint16_t N = a->N;
+    if (N != b->N)
+        return 0;
+    c->N = N;
+
+    uint16_t i;
+    for (i=N; i<NTRU_INT_POLY_SIZE; i++)
+        a->coeffs[i] = 0;
+    int16_t c_coeffs_arr[32+2*NTRU_INT_POLY_SIZE];   /* double capacity for intermediate result + another 8 */
+    int16_t *c_coeffs = c_coeffs_arr + 32;
+    memset(&c_coeffs_arr, 0, sizeof(c_coeffs_arr));
+
+    __m512i a_coeffs0[32];    
+    a_coeffs0[0] = _mm512_loadu_si512((__m512i*)&a->coeffs[0]);
+
+
+
+    /* Emulate the SSE full-register shifting behaviour in AVX512. */
+    /* In contrast to AVX2, with AVX512 this is possible with one instruction. */
+    __m512i mask = {0x2000100000000 , 0x6000500040003 , 
+                    0xa000900080007 , 0xe000d000c000b , 
+                    0x1200110010000f , 0x16001500140013 , 
+                    0x1a001900180017 , 0x1e001d001c001b};
+    for (i=1; i<32; i++) {
+        a_coeffs0[i] = _mm512_maskz_permutexvar_epi16(0xfffffffe,mask, a_coeffs0[i-1]);         
+    }
+
+
+    /* add coefficients that are multiplied by 1 */
+    for (i=0; i<b->num_ones; i++) {
+        int16_t k = b->ones[i];
+        /* process the first num_coeffs0 coefficients, 1<=num_coeffs0<=8 */
+        uint8_t num_bytes0 = 64 - (((size_t)&c_coeffs[k])%64);
+        uint8_t num_coeffs0 = num_bytes0 / 2;   /* c_coeffs[k+num_coeffs0] is 32-byte aligned */
+        k -= 32 - num_coeffs0;
+        __m512i *ck = (__m512i*)&c_coeffs[k];
+        __m512i aj = a_coeffs0[32-num_coeffs0];
+        __m512i ca = _mm512_add_epi16(*ck, aj);
+        _mm512_store_si512(ck, ca);
+        k += 32;
+        /* process the remaining coefficients in blocks of 16. */
+        /* it is safe not to truncate the last block of 16 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        ck = (__m512i*)&c_coeffs[k];
+        int16_t j;
+        for (j=num_coeffs0; j<N; j+=32,k+=32) {
+            __m512i aj = _mm512_loadu_si512((__m512i*)&a->coeffs[j]);
+            __m512i ca = _mm512_add_epi16(*ck, aj);
+            _mm512_store_si512(ck, ca);
+            ck++;
+        }
+    }
+
+    /* subtract coefficients that are multiplied by -1 */
+    for (i=0; i<b->num_neg_ones; i++) {
+        int16_t k = b->neg_ones[i];
+        /* process the first num_coeffs0 coefficients, 1<=num_coeffs0<=8 */
+        uint8_t num_bytes0 = 64 - (((size_t)&c_coeffs[k])%64);
+        uint8_t num_coeffs0 = num_bytes0 / 2;   /* c_coeffs[k+num_coeffs0] is 32-byte aligned */
+        k -= 32 - num_coeffs0;
+        __m512i *ck = (__m512i*)&c_coeffs[k];
+        __m512i aj = a_coeffs0[32-num_coeffs0];
+        __m512i ca = _mm512_sub_epi16(*ck, aj);
+        _mm512_store_si512(ck, ca);
+        k += 32;
+        /* process the remaining coefficients in blocks of 16. */
+        /* it is safe not to truncate the last block of 16 coefficients */
+        /* because there is extra room at the end of the coeffs array  */
+        ck = (__m512i*)&c_coeffs[k];
+        int16_t j;
+        for (j=num_coeffs0; j<N; j+=32,k+=32) {
+            __m512i aj = _mm512_loadu_si512((__m512i*)&a->coeffs[j]);
+            __m512i ca = _mm512_sub_epi16(*ck, aj);
+            _mm512_store_si512(ck, ca);
+            ck++;
+        }
+    }
+
+    /* reduce c_coeffs[0..2N-1] to [0..N-1] and apply mod_mask to reduce values mod q */
+    /* handle the first coefficients individually if c_coeffs is not 16-byte aligned */
+    for (i=0; ((size_t)&c_coeffs[i])%64; i++)
+        c->coeffs[i] = (c_coeffs[i] + c_coeffs[N+i]) & mod_mask;
+    /* handle the remaining ones in blocks of 16 */
+    __m512i mod_mask_512 = _mm512_set1_epi16(mod_mask);
+    __m512i *ci = (__m512i*)(&c_coeffs[i]);
+    for (; i<N; i+=32) {
+        __m512i c512_1 = _mm512_loadu_si512((__m512i*)&c_coeffs[i+N]);
+        __m512i c512_0 = _mm512_add_epi16(*ci, c512_1);
+        c512_0 = _mm512_and_si512(c512_0, mod_mask_512);
+        _mm512_storeu_si512((__m512i*)&c->coeffs[i], c512_0);
+        ci++;
+    }
+
+    return 1;
+}
+
+uint8_t ntru_mult_tern_avx512(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+    if (b->num_ones<NTRU_SPARSE_THRESH && b->num_neg_ones<NTRU_SPARSE_THRESH)
+        return ntru_mult_tern_avx512_sparse(a, b, c, mod_mask);
+    else
+        return ntru_mult_tern_avx512_dense(a, b, c, mod_mask);
+}
+#endif   /* __AVX512F__ */
+
+uint8_t ntru_mult_tern(NtruIntPoly *a, NtruTernPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
+#ifdef __AVX512F__
+    return ntru_mult_tern_avx512(a, b, c, mod_mask);
+#elif __AVX2__
+    return ntru_mult_tern_avx2(a, b, c, mod_mask);
+#elif __SSSE3__
+    return ntru_mult_tern_sse(a, b, c, mod_mask);
+#elif _LP64
+    return ntru_mult_tern_64(a, b, c, mod_mask);
+#else
+    return ntru_mult_tern_32(a, b, c, mod_mask);
+#endif
+}
+
 
 #ifndef NTRU_AVOID_HAMMING_WT_PATENT
 uint8_t ntru_mult_prod(NtruIntPoly *a, NtruProdPoly *b, NtruIntPoly *c, uint16_t mod_mask) {
@@ -1132,6 +1623,32 @@ void ntru_mod_sse(NtruIntPoly *p, uint16_t mod_mask) {
 }
 #endif
 
+#ifdef __AVX2__
+void ntru_mod_avx2(NtruIntPoly *p, uint16_t mod_mask) {
+    uint16_t i;
+    __m256i mod_mask_256 = _mm256_set1_epi16(mod_mask);
+
+    for (i=0; i<p->N; i+=16) {
+        __m256i a = _mm256_lddqu_si256((__m256i*)&p->coeffs[i]);
+        a = _mm256_and_si256(a, mod_mask_256);
+        _mm256_storeu_si256((__m256i*)&p->coeffs[i], a);
+    }
+}
+#endif   /* __AVX2__ */
+
+#ifdef __AVX512F__
+void ntru_mod_avx512(NtruIntPoly *p, uint16_t mod_mask) {
+    uint16_t i;
+    __m512i mod_mask_512 = _mm512_set1_epi16(mod_mask);
+
+    for (i=0; i<p->N; i+=32) {
+        __m512i a = _mm512_loadu_si512((__m512i*)&p->coeffs[i]);
+        a = _mm512_and_si512(a, mod_mask_512);
+        _mm512_storeu_si512((__m512i*)&p->coeffs[i], a);
+    }
+}
+#endif   /* __AVX512F__ */
+
 void ntru_mod_64(NtruIntPoly *p, uint16_t mod_mask) {
     typedef uint64_t __attribute__((__may_alias__)) uint64_t_alias;
     uint64_t mod_mask_64 = mod_mask;
@@ -1152,7 +1669,11 @@ void ntru_mod_32(NtruIntPoly *p, uint16_t modulus) {
 }
 
 void ntru_mod_mask(NtruIntPoly *p, uint16_t mod_mask) {
-#ifdef __SSSE3__
+#ifdef __AVX512F__
+    ntru_mod_avx512(p, mod_mask);
+#elif __AVX2__
+    ntru_mod_avx2(p, mod_mask);
+#elif __SSSE3__
     ntru_mod_sse(p, mod_mask);
 #elif _LP64
     ntru_mod_64(p, mod_mask);
@@ -1227,8 +1748,108 @@ void ntru_mod3_sse(NtruIntPoly *p) {
 }
 #endif   /* __SSSE3__ */
 
+#ifdef __AVX2__
+__m256i NTRU_MOD3_LUT_AVX = {0x0403050403050403, 0, 0x0403050403050403, 0};
+
+void ntru_mod3_avx2(NtruIntPoly *p) {
+    uint16_t i;
+    for (i=0; i<(p->N+15)/16*16; i+=16) {
+        __m256i a = _mm256_lddqu_si256((__m256i*)&p->coeffs[i]);
+
+        /* make positive */
+        __m256i _3000 = _mm256_set1_epi16(3000);
+        a = _mm256_add_epi16(a, _3000);
+
+        /* a = (a>>8) + (a&0xFF);  (sum base 2**8 digits) */
+        __m256i a1 = _mm256_srli_epi16(a, 8);
+        __m256i mask = _mm256_set1_epi16(0x00FF);
+        __m256i a2 = _mm256_and_si256(a, mask);
+        a = _mm256_add_epi16(a1, a2);
+
+        /* a = (a>>4) + (a&0xF);  (sum base 2**4 digits; worst case 0x3B) */
+        a1 = _mm256_srli_epi16(a, 4);
+        mask = _mm256_set1_epi16(0x000F);
+        a2 = _mm256_and_si256(a, mask);
+        a = _mm256_add_epi16(a1, a2);
+        /* a = (a>>2) + (a&0x3);  (sum base 2**2 digits; worst case 0x1B) */
+        a1 = _mm256_srli_epi16(a, 2);
+        mask = _mm256_set1_epi16(0x0003);
+        a2 = _mm256_and_si256(a, mask);
+        a = _mm256_add_epi16(a1, a2);
+
+        /* a = (a>>2) + (a&0x3);  (sum base 2**2 digits; worst case 0x7) */
+        a1 = _mm256_srli_epi16(a, 2);
+        mask = _mm256_set1_epi16(0x0003);
+        a2 = _mm256_and_si256(a, mask);
+        a = _mm256_add_epi16(a1, a2);
+
+        __m256i a_mod3 = _mm256_shuffle_epi8(NTRU_MOD3_LUT_AVX, a);
+        /* _mm256_shuffle_epi8 changed bytes 1, 3, 5, ... to non-zero; change them back to zero */
+        mask = _mm256_set1_epi16(0x00FF);
+        a_mod3 = _mm256_and_si256(a_mod3, mask);
+        /* subtract 3 so coefficients are in the 0..2 range */
+        __m256i three = _mm256_set1_epi16(0x0003);
+        a_mod3 = _mm256_sub_epi16(a_mod3, three);
+
+        _mm256_storeu_si256((__m256i*)&p->coeffs[i], a_mod3);
+    }
+}
+#endif   /* __AVX2__ */
+
+#ifdef __AVX512F__
+__m512i NTRU_MOD3_LUT_AVX512 = {0x0403050403050403, 0, 0x0403050403050403, 0, 0x0403050403050403, 0, 0x0403050403050403, 0};
+
+void ntru_mod3_avx512(NtruIntPoly *p) {
+    uint16_t i;
+    for (i=0; i<(p->N+31)/32*32; i+=32) {
+        __m512i a = _mm512_loadu_si512((__m512i*)&p->coeffs[i]);
+
+        /* make positive */
+        __m512i _3000 = _mm512_set1_epi16(3000);
+        a = _mm512_add_epi16(a, _3000);
+
+        /* a = (a>>8) + (a&0xFF);  (sum base 2**8 digits) */
+        __m512i a1 = _mm512_srli_epi16(a, 8);
+        __m512i mask = _mm512_set1_epi16(0x00FF);
+        __m512i a2 = _mm512_and_si512(a, mask);
+        a = _mm512_add_epi16(a1, a2);
+
+        /* a = (a>>4) + (a&0xF);  (sum base 2**4 digits; worst case 0x3B) */
+        a1 = _mm512_srli_epi16(a, 4);
+        mask = _mm512_set1_epi16(0x000F);
+        a2 = _mm512_and_si512(a, mask);
+        a = _mm512_add_epi16(a1, a2);
+        /* a = (a>>2) + (a&0x3);  (sum base 2**2 digits; worst case 0x1B) */
+        a1 = _mm512_srli_epi16(a, 2);
+        mask = _mm512_set1_epi16(0x0003);
+        a2 = _mm512_and_si512(a, mask);
+        a = _mm512_add_epi16(a1, a2);
+
+        /* a = (a>>2) + (a&0x3);  (sum base 2**2 digits; worst case 0x7) */
+        a1 = _mm512_srli_epi16(a, 2);
+        mask = _mm512_set1_epi16(0x0003);
+        a2 = _mm512_and_si512(a, mask);
+        a = _mm512_add_epi16(a1, a2);
+
+        __m512i a_mod3 = _mm512_shuffle_epi8(NTRU_MOD3_LUT_AVX512, a);
+        /* _mm512_shuffle_epi8 changed bytes 1, 3, 5, ... to non-zero; change them back to zero */
+        mask = _mm512_set1_epi16(0x00FF);
+        a_mod3 = _mm512_and_si512(a_mod3, mask);
+        /* subtract 3 so coefficients are in the 0..2 range */
+        __m512i three = _mm512_set1_epi16(0x0003);
+        a_mod3 = _mm512_sub_epi16(a_mod3, three);
+
+        _mm512_storeu_si512((__m512i*)&p->coeffs[i], a_mod3);
+    }
+}
+#endif   /* __AVX512F__ */
+
 void ntru_mod3(NtruIntPoly *p) {
-#ifdef __SSSE3__
+#ifdef __AVX512F__
+    ntru_mod3_avx512(p);
+#elif __AVX2__
+    ntru_mod3_avx2(p);
+#elif __SSSE3__
     ntru_mod3_sse(p);
 #else
     ntru_mod3_standard(p);

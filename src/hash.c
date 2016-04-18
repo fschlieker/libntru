@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdint.h>
-#if defined __SSSE3__ && _LP64
+//#if defined __SSSE3__ && _LP64
+#if defined(_LP64) && (defined(__SSSE3__) || defined(__AVX2__) || defined(__AVX512F__))
 #include <tmmintrin.h>
 #endif
 #ifdef WIN32
@@ -26,7 +27,8 @@ void ntru_sha256(uint8_t *input, uint16_t input_len, uint8_t *digest) {
     sph_sha256_close(&context, digest);
 }
 
-#if defined __SSSE3__ && _LP64
+//#if defined __SSSE3__ && _LP64
+#if defined(_LP64) && (defined(__SSSE3__) || defined(__AVX2__) || defined(__AVX512F__))
 typedef struct {
     uint32_t A[8], B[8], C[8], D[8], E[8];
     uint32_t Nl,Nh;
