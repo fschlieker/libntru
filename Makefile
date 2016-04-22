@@ -39,6 +39,10 @@ MACHINE=$(shell uname -m | sed 's/i.86/i386/g')
 #     endif
 # endif
 
+ifeq ($(USE_AES_NI), yes)
+	CFLAGS += -maes -DUSE_AES_NI
+endif
+
 OPTFLAGS=-O2
 bench: OPTFLAGS=-O3 $(BENCH_ARCH_OPTION)
 CFLAGS+=$(OPTFLAGS)
@@ -79,7 +83,7 @@ libntru.so: $(LIB_OBJS_PATHS)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -shared -Wl,-soname,libntru.so -o libntru.so $(LIB_OBJS_PATHS) $(LDFLAGS) $(LIBS)
 
 libntru.a: $(LIB_OBJS_PATHS)
-	$(AR) cru libntru.a $(LIB_OBJS_PATHS)
+	$(AR) cru libntru.a $(LIB_OBJS_PATHS) aes/ecb.o aes/key_expansion.o aes/vaes128_key_expansion.o aes/vaes192_key_expansion.o aes/vaes256_key_expansion.o 
 
 
 test:
@@ -97,7 +101,7 @@ testham: clean lib $(TEST_OBJS_PATHS)
 	$(CC) $(CFLAGS) -o testham $(TEST_OBJS_PATHS) -L. -lntru -lm
 
 testnoham: CFLAGS += -DNTRU_AVOID_HAMMING_WT_PATENT
-testnoham: clean lib $(TEST_OBJS_PATHS)
+testnoham: clean static-lib $(TEST_OBJS_PATHS)
 	@echo CFLAGS=$(CFLAGS)
 	$(CC) $(CFLAGS) -o testnoham $(TEST_OBJS_PATHS) -L. -lntru -lm
 
